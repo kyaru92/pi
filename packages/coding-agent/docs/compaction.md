@@ -17,7 +17,7 @@ Pi has two summarization mechanisms:
 
 | Mechanism | Trigger | Purpose |
 |-----------|---------|---------|
-| Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
+| Compaction | Next model request exceeds threshold, or `/compact` | Summarize old messages to free up context |
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
 Both use the same structured summary format and track file operations cumulatively.
@@ -26,13 +26,15 @@ Both use the same structured summary format and track file operations cumulative
 
 ### When It Triggers
 
-Auto-compaction triggers when:
+Auto-compaction checks the complete outbound context immediately before each model request, after queued steering or follow-up messages have been added. It triggers when:
 
 ```
 contextTokens > contextWindow - reserveTokens
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
+The estimate includes the system prompt, messages, and available tool definitions. Compaction finishes synchronously before the request starts, including between a completed tool batch and the next model turn. A final assistant response does not trigger compaction because no further model request is pending.
+
+By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response. If a provider still reports a context overflow, pi compacts and retries once.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 

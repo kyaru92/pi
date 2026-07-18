@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed auto-compaction to run immediately before an oversized model request, including after tool batches, while avoiding unnecessary compaction after a final response.
 - Fixed prompt-template defaults for all arguments (`${@:-default}` and `${ARGUMENTS:-default}`) ([#6695](https://github.com/earendil-works/pi/issues/6695)).
 - Fixed obsolete custom UI, custom tool, and custom editor examples in the extension documentation ([#6735](https://github.com/earendil-works/pi/issues/6735)).
 - Fixed Kimi Coding sessions to show API-equivalent implied costs with the subscription indicator.

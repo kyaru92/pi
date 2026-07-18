@@ -65,9 +65,9 @@ describe("pre-prompt compaction regression", () => {
 
 		expect(continueSpy).not.toHaveBeenCalled();
 		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
-			reason: "overflow",
+			reason: "threshold",
 			aborted: false,
-			willRetry: true,
+			willRetry: false,
 		});
 		expect(getUserTexts(harness)).toContain("next prompt");
 		expect(harness.faux.state.callCount).toBe(1);

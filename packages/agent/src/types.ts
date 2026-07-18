@@ -137,6 +137,12 @@ export interface AgentLoopTurnUpdate {
 
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
+/** Context passed immediately before a provider request starts. */
+export interface PrepareModelRequestContext {
+	/** Current agent context, including any queued messages injected for this request. */
+	context: AgentContext;
+}
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
@@ -219,6 +225,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	prepareNextTurn?: (
 		context: PrepareNextTurnContext,
+	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
+
+	/**
+	 * Called only when the loop is about to start a provider request, after queued messages are injected.
+	 * Return replacement context/model/thinking state to affect that request.
+	 */
+	prepareModelRequest?: (
+		context: PrepareModelRequestContext,
+		signal?: AbortSignal,
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
 
 	/**

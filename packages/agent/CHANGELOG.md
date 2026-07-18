@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `prepareModelRequest` hook that can atomically replace context, model, or thinking state immediately before each provider request.
+
 ## [0.80.10] - 2026-07-16
 
 ## [0.80.9] - 2026-07-16

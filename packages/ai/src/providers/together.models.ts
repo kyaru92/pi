@@ -73,6 +73,10 @@ export const TOGETHER_MODELS = values as {
 		id: "openai/gpt-oss-20b";
 		provider: "together";
 	};
+	"thinkingmachines/Inkling": Model<"openai-completions"> & {
+		id: "thinkingmachines/Inkling";
+		provider: "together";
+	};
 	"zai-org/GLM-5": Model<"openai-completions"> & {
 		id: "zai-org/GLM-5";
 		provider: "together";

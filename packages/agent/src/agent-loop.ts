@@ -189,6 +189,21 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
+			const requestSnapshot = await config.prepareModelRequest?.({ context: currentContext }, signal);
+			if (requestSnapshot) {
+				currentContext = requestSnapshot.context ?? currentContext;
+				config = {
+					...config,
+					model: requestSnapshot.model ?? config.model,
+					reasoning:
+						requestSnapshot.thinkingLevel === undefined
+							? config.reasoning
+							: requestSnapshot.thinkingLevel === "off"
+								? undefined
+								: requestSnapshot.thinkingLevel,
+				};
+			}
+
 			// Stream assistant response
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
 			newMessages.push(message);

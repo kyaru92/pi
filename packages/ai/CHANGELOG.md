@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported context token estimation utilities from the main package entrypoint.
+
 ### Fixed
 
 - Fixed GitHub Copilot long-context pricing tiers in generated model metadata ([#6668](https://github.com/earendil-works/pi/issues/6668)).

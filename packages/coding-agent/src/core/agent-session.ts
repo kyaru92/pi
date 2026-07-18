@@ -21,6 +21,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	PrepareModelRequestContext,
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
@@ -36,6 +37,7 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	estimateContextTokens as estimateLlmContextTokens,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isRetryableAssistantError,
@@ -374,6 +376,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._installAgentModelRequestPreparation();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -515,6 +518,25 @@ export class AgentSession {
 				},
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
+			};
+		};
+	}
+
+	private _installAgentModelRequestPreparation(): void {
+		const previousPrepareModelRequest = this.agent.prepareModelRequest;
+		this.agent.prepareModelRequest = async (request, signal) => {
+			const previousSnapshot = await previousPrepareModelRequest?.(request, signal);
+			const context = previousSnapshot?.context ?? request.context;
+			const model = previousSnapshot?.model ?? this.agent.state.model;
+			const thinkingLevel = previousSnapshot?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			const preparedRequest: PrepareModelRequestContext = { context };
+			const compactedContext = await this._compactBeforeModelRequest(preparedRequest, model, signal);
+
+			return {
+				...previousSnapshot,
+				context: compactedContext,
+				model,
+				thinkingLevel,
 			};
 		};
 	}
@@ -666,18 +688,6 @@ export class AgentSession {
 		if (typeof content === "string") return content;
 		const textBlocks = content.filter((c) => c.type === "text");
 		return textBlocks.map((c) => (c as TextContent).text).join("");
-	}
-
-	/** Find the last assistant message in agent state (including aborted ones) */
-	private _findLastAssistantMessage(): AssistantMessage | undefined {
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role === "assistant") {
-				return msg as AssistantMessage;
-			}
-		}
-		return undefined;
 	}
 
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
@@ -1081,7 +1091,7 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(msg)) {
+		if (await this._checkOverflowCompaction(msg)) {
 			return true;
 		}
 
@@ -1180,13 +1190,6 @@ export class AgentSession {
 					);
 				}
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
-			}
-
-			// Check if we need to compact before sending (catches aborted responses).
-			// The user's new prompt is sent below, so do not call agent.continue() here.
-			const lastAssistant = this._findLastAssistantMessage();
-			if (lastAssistant) {
-				await this._checkCompaction(lastAssistant, false);
 			}
 
 			// Build messages array (custom message if any, then user message)
@@ -1921,114 +1924,103 @@ export class AgentSession {
 		this._branchSummaryAbortController?.abort();
 	}
 
-	/**
-	 * Check if compaction is needed and run it.
-	 * Called after agent_end and before prompt submission.
-	 *
-	 * Two cases:
-	 * 1. Overflow: LLM returned context overflow error, remove error message from agent state, compact, auto-retry
-	 * 2. Threshold: Context over threshold, compact, NO auto-retry (user continues manually)
-	 *
-	 * @param assistantMessage The assistant message to check
-	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
-	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _compactBeforeModelRequest(
+		request: PrepareModelRequestContext,
+		model: Model<any>,
+		signal?: AbortSignal,
+	): Promise<PrepareModelRequestContext["context"]> {
+		if (signal?.aborted) {
+			return request.context;
+		}
 		const settings = this.settingsManager.getCompactionSettings();
-		if (!settings.enabled) return false;
+		if (!settings.enabled || model.contextWindow <= 0) {
+			return request.context;
+		}
 
-		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
-		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
+		const llmMessages = await this.agent.convertToLlm(request.context.messages);
+		const contextTokens = estimateLlmContextTokens({
+			systemPrompt: request.context.systemPrompt,
+			messages: llmMessages,
+			tools: request.context.tools,
+		}).tokens;
+		if (!shouldCompact(contextTokens, model.contextWindow, settings)) {
+			return request.context;
+		}
+
+		const compacted = await this._runAutoCompaction("threshold", false, signal);
+		if (!compacted) {
+			// Nothing to compact (session too small) — let the request proceed.
+			// The provider will return an overflow error if context is truly too large,
+			// and the overflow recovery path will handle it.
+			return request.context;
+		}
+
+		const context = {
+			systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
+			messages: this.agent.state.messages.slice(),
+			tools: this.agent.state.tools.slice(),
+		};
+		const compactedMessages = await this.agent.convertToLlm(context.messages);
+		const compactedTokens = estimateLlmContextTokens({
+			systemPrompt: context.systemPrompt,
+			messages: compactedMessages,
+			tools: context.tools,
+		}).tokens;
+		if (shouldCompact(compactedTokens, model.contextWindow, settings)) {
+			throw new Error(
+				"Compaction completed, but the next model request still exceeds the context limit. Reduce keepRecentTokens or use a model with a larger context window.",
+			);
+		}
+		return context;
+	}
+
+	/** Recover from a provider-reported context overflow after a failed request. */
+	private async _checkOverflowCompaction(assistantMessage: AssistantMessage): Promise<boolean> {
+		const settings = this.settingsManager.getCompactionSettings();
+		if (!settings.enabled || assistantMessage.stopReason !== "error") return false;
 
 		const contextWindow = this.model?.contextWindow ?? 0;
-
-		// Skip overflow check if the message came from a different model.
-		// This handles the case where user switched from a smaller-context model (e.g. opus)
-		// to a larger-context model (e.g. codex) - the overflow error from the old model
-		// shouldn't trigger compaction for the new model.
 		const sameModel =
 			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
+		if (!sameModel || !isContextOverflow(assistantMessage, contextWindow)) return false;
 
-		// Skip compaction checks if this assistant message is older than the latest
-		// compaction boundary. This prevents a stale pre-compaction usage/error
-		// from retriggering compaction on the first prompt after compaction.
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
-		if (assistantIsFromBeforeCompaction) {
+		if (compactionEntry && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime()) {
 			return false;
 		}
 
-		// Case 1: Overflow - LLM returned context overflow error, or reported usage exceeded
-		// the configured window. A successful response over the configured window should compact
-		// but must not retry: the assistant answer already completed and agent.continue() cannot
-		// continue from an assistant message.
-		if (sameModel && isContextOverflow(assistantMessage, contextWindow)) {
-			const willRetry = assistantMessage.stopReason !== "stop";
-
-			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
-			}
-
-			if (this._overflowRecoveryAttempted) {
-				this._emit({
-					type: "compaction_end",
-					reason: "overflow",
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-					errorMessage:
-						"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
-				});
-				return false;
-			}
-
-			this._overflowRecoveryAttempted = true;
-			// Remove the error message from agent state (it IS saved to session for history,
-			// but we don't want it in context for the retry)
-			const messages = this.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.state.messages = messages.slice(0, -1);
-			}
-			return await this._runAutoCompaction("overflow", willRetry);
+		if (this._overflowRecoveryAttempted) {
+			this._emit({
+				type: "compaction_end",
+				reason: "overflow",
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+				errorMessage:
+					"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+			});
+			return false;
 		}
 
-		// Case 2: Threshold - context is getting large
-		// For error messages or all-zero usage messages, estimate from the last valid response.
-		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
-		// responses can still compact and do not reset context accounting.
-		let contextTokens: number;
-		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
-		if (assistantMessage.stopReason === "error" || directContextTokens === 0) {
-			const messages = this.agent.state.messages;
-			const estimate = estimateContextTokens(messages);
-			if (estimate.lastUsageIndex === null) return false; // No usage data at all
-			// Verify the usage source is post-compaction. Kept pre-compaction messages
-			// have stale usage reflecting the old (larger) context and would falsely
-			// trigger compaction right after one just finished.
-			const usageMsg = messages[estimate.lastUsageIndex];
-			if (
-				compactionEntry &&
-				usageMsg.role === "assistant" &&
-				(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
-			) {
-				return false;
-			}
-			contextTokens = estimate.tokens;
-		} else {
-			contextTokens = directContextTokens;
+		this._overflowRecoveryAttempted = true;
+		const messages = this.agent.state.messages;
+		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+			this.agent.state.messages = messages.slice(0, -1);
 		}
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			return await this._runAutoCompaction("threshold", false);
-		}
-		return false;
+		return await this._runAutoCompaction("overflow", true);
 	}
 
 	/**
 	 * Internal: Run auto-compaction with events.
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		parentSignal?: AbortSignal,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		let started = false;
+		let removeParentAbortListener: (() => void) | undefined;
 
 		try {
 			if (!this.model) {
@@ -2057,6 +2049,15 @@ export class AgentSession {
 
 			this._emit({ type: "compaction_start", reason });
 			this._autoCompactionAbortController = new AbortController();
+			if (parentSignal) {
+				const abortFromParent = () => this._autoCompactionAbortController?.abort();
+				if (parentSignal.aborted) {
+					abortFromParent();
+				} else {
+					parentSignal.addEventListener("abort", abortFromParent, { once: true });
+					removeParentAbortListener = () => parentSignal.removeEventListener("abort", abortFromParent);
+				}
+			}
 			started = true;
 
 			let extensionCompaction: CompactionResult | undefined;
@@ -2190,6 +2191,7 @@ export class AgentSession {
 			}
 			return false;
 		} finally {
+			removeParentAbortListener?.();
 			this._autoCompactionAbortController = undefined;
 		}
 	}

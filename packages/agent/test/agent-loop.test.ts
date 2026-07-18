@@ -7,7 +7,7 @@ import {
 	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 
@@ -965,6 +965,106 @@ describe("agentLoop with AgentMessage", () => {
 
 		// With executionMode=parallel, second tool should start before first finishes
 		expect(parallelObserved).toBe(true);
+	});
+
+	it("should prepare each model request after queued messages are injected", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = {
+			systemPrompt: "original prompt",
+			messages: [],
+			tools: [tool],
+		};
+		const preparedRoles: string[][] = [];
+		const providerPrompts: string[] = [];
+		let requestCount = 0;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareModelRequest: async ({ context: requestContext }) => {
+				requestCount++;
+				preparedRoles.push(requestContext.messages.map((message) => message.role));
+				return {
+					context: {
+						...requestContext,
+						systemPrompt: `prepared ${requestCount}`,
+						messages: requestContext.messages.slice(),
+					},
+				};
+			},
+		};
+
+		let llmCalls = 0;
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, (_model, ctx) => {
+			llmCalls++;
+			providerPrompts.push(ctx.systemPrompt ?? "");
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (llmCalls === 1) {
+					mockStream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+							"toolUse",
+						),
+					});
+				} else {
+					mockStream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+			});
+			return mockStream;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(preparedRoles).toEqual([["user"], ["user", "assistant", "toolResult"]]);
+		expect(providerPrompts).toEqual(["prepared 1", "prepared 2"]);
+		expect(requestCount).toBe(2);
+	});
+
+	it("does not prepare a model request after a final assistant response", async () => {
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const prepareModelRequest = vi.fn(async () => undefined);
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareModelRequest,
+		};
+		const stream = agentLoop([createUserMessage("finish")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				mockStream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return mockStream;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(prepareModelRequest).toHaveBeenCalledTimes(1);
 	});
 
 	it("should use prepareNextTurn snapshot before continuing", async () => {
