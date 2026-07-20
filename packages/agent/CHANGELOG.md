@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Moved the `uuidv7` export to `@earendil-works/pi-ai`.
+
 ### Added
 
 - Added a `prepareModelRequest` hook that can atomically replace context, model, or thinking state immediately before each provider request.
