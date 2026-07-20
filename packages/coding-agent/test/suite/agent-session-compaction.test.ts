@@ -10,7 +10,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, type Harness } from "./harness.ts";
+import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
 	_checkOverflowCompaction: (assistantMessage: AssistantMessage) => Promise<boolean>;
@@ -80,6 +80,7 @@ describe("AgentSession pre-request compaction", () => {
 	});
 
 	it("compacts between a tool batch and the next provider request", async () => {
+		let requestAfterCompaction = "";
 		const tool: AgentTool = {
 			name: "large_result",
 			label: "Large result",
@@ -87,7 +88,7 @@ describe("AgentSession pre-request compaction", () => {
 			parameters: Type.Object({}),
 			async execute() {
 				return {
-					content: [{ type: "text", text: "x".repeat(800) }],
+					content: [{ type: "text", text: "x".repeat(1600) }],
 					details: {},
 				};
 			},
@@ -98,11 +99,11 @@ describe("AgentSession pre-request compaction", () => {
 			settings: {
 				compaction: {
 					enabled: true,
-					keepRecentTokens: 210,
-					reserveTokens: 1550,
+					keepRecentTokens: 401,
+					reserveTokens: 1700,
 				},
 			},
-			models: [{ id: "faux-1", contextWindow: 2000, maxTokens: 2000 }],
+			models: [{ id: "faux-1", contextWindow: 3000, maxTokens: 3000 }],
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => ({
@@ -118,9 +119,12 @@ describe("AgentSession pre-request compaction", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			() => fauxAssistantMessage("first response"),
+			() => fauxAssistantMessage("old-response ".repeat(200)),
 			(_context) => fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
-			(_context) => fauxAssistantMessage("done"),
+			(context) => {
+				requestAfterCompaction = context.messages.map(getMessageText).join("\n");
+				return fauxAssistantMessage("done");
+			},
 		]);
 
 		await harness.session.prompt("seed");
@@ -128,6 +132,8 @@ describe("AgentSession pre-request compaction", () => {
 
 		expect(harness.eventsOfType("compaction_start")).toEqual([{ type: "compaction_start", reason: "threshold" }]);
 		expect(harness.faux.state.callCount).toBe(3);
+		expect(requestAfterCompaction).toContain("previous messages compacted");
+		expect(requestAfterCompaction).not.toContain("old-response");
 	});
 
 	it("does not retry overflow recovery more than once", async () => {

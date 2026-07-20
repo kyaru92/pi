@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed successful pre-request compaction to use the rebuilt context instead of the stale request snapshot, preventing repeated compactions.
 - Fixed auto-compaction to run immediately before an oversized model request, including after tool batches, while avoiding unnecessary compaction after a final response.
 - Fixed persisted sessions being read and parsed twice when opened, reducing startup latency for large sessions ([#6793](https://github.com/earendil-works/pi/issues/6793)).
 - Fixed prompt-template defaults for all arguments (`${@:-default}` and `${ARGUMENTS:-default}`) ([#6695](https://github.com/earendil-works/pi/issues/6695)).

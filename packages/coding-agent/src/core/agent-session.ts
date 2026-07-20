@@ -2162,9 +2162,7 @@ export class AgentSession {
 				return true;
 			}
 
-			// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
-			// Continue once so queued messages are delivered.
-			return this.agent.hasQueuedMessages();
+			return true;
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			if (started) {
