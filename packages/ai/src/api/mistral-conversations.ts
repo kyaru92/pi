@@ -1,4 +1,4 @@
-import { Mistral } from "@mistralai/mistralai";
+import { HTTPClient, Mistral } from "@mistralai/mistralai";
 import type {
 	ChatCompletionStreamRequest,
 	ChatCompletionStreamRequestMessage,
@@ -66,6 +66,7 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 			const mistral = new Mistral({
 				apiKey,
 				serverURL: model.baseUrl,
+				...(options?.fetch ? { httpClient: new HTTPClient({ fetcher: options.fetch }) } : {}),
 			});
 
 			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
@@ -88,7 +89,7 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 				throw new Error("Mistral stream ended without a finish reason");
 			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
+				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -352,7 +353,12 @@ async function consumeChatStream(
 		if (!choice) continue;
 
 		if (choice.finishReason) {
-			output.stopReason = mapChatStopReason(choice.finishReason);
+			output.rawStopReason = choice.finishReason;
+			const stopReasonResult = mapChatStopReason(choice.finishReason);
+			output.stopReason = stopReasonResult.stopReason;
+			if (stopReasonResult.errorMessage) {
+				output.errorMessage = stopReasonResult.errorMessage;
+			}
 		}
 
 		const delta = choice.delta;
@@ -653,19 +659,19 @@ function mapToolChoice(
 	};
 }
 
-function mapChatStopReason(reason: string | null): StopReason {
-	if (reason === null) return "stop";
+function mapChatStopReason(reason: string | null): { stopReason: StopReason; errorMessage?: string } {
+	if (reason === null) return { stopReason: "stop" };
 	switch (reason) {
 		case "stop":
-			return "stop";
+			return { stopReason: "stop" };
 		case "length":
 		case "model_length":
-			return "length";
+			return { stopReason: "length" };
 		case "tool_calls":
-			return "toolUse";
+			return { stopReason: "toolUse" };
 		case "error":
-			return "error";
+			return { stopReason: "error", errorMessage: "Provider stopped with: error" };
 		default:
-			return "stop";
+			return { stopReason: "error", errorMessage: `Provider stopped with: ${reason}` };
 	}
 }
