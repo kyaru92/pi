@@ -20,6 +20,7 @@ subagent/
 ├── agents.ts            # Agent discovery logic
 ├── agents/              # Sample agent definitions
 │   ├── scout.md         # Fast recon, returns compressed context
+│   ├── explore.md       # Thorough, self-contained codebase handoff
 │   ├── planner.md       # Creates implementation plans
 │   ├── reviewer.md      # Code review
 │   └── worker.md        # General-purpose (full capabilities)
@@ -69,6 +70,11 @@ When running interactively, the tool prompts for confirmation before running pro
 ### Single agent
 ```
 Use scout to find all authentication code
+```
+
+### Implementation-ready exploration
+```
+Use explore to trace the authentication flow and return a self-contained handoff with evidence
 ```
 
 ### Parallel execution
@@ -132,6 +138,7 @@ name: my-agent
 description: What this agent does
 tools: read, grep, find, ls
 model: claude-haiku-4-5
+reasoning_effort: low
 ---
 
 System prompt for the agent goes here.
@@ -143,11 +150,14 @@ System prompt for the agent goes here.
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 
+The optional `reasoning_effort` field is forwarded to the child process as `--thinking`. Supported values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; unsupported values are reported by the pi CLI.
+
 ## Sample Agents
 
 | Agent | Purpose | Model | Tools |
 |-------|---------|-------|-------|
 | `scout` | Fast codebase recon | Haiku | read, grep, find, ls, bash |
+| `explore` | Thorough, implementation-ready codebase handoff | Sonnet | read, grep, find, ls, bash |
 | `planner` | Implementation plans | Sonnet | read, grep, find, ls |
 | `reviewer` | Code review | Sonnet | read, grep, find, ls, bash |
 | `worker` | General-purpose | Sonnet | (all default) |
@@ -171,5 +181,14 @@ Project agents override user agents with the same name when `agentScope: "both"`
 
 - Output truncated to last 10 items in collapsed view (expand to see all)
 - Parallel model-visible output is capped at 50 KB per task; full results remain in tool details
+- The parent model receives the child agent's final text, not the full tool transcript stored in result details
 - Agents discovered fresh on each invocation (allows editing mid-session)
 - Parallel mode limited to 8 tasks, 4 concurrent
+
+## Future Improvements
+
+- **Structured handoff validation**: Define machine-readable output contracts for agents such as `explore`, validate required evidence and line references, and report incomplete handoffs before returning them to the parent.
+- **Same-session repair**: Replace one-shot `--no-session` child processes with SDK sessions or long-lived RPC processes so an incomplete handoff can be repaired without repeating the original exploration.
+- **On-demand evidence retrieval**: Assign handoff IDs and expose selected prior read/tool results to the parent without injecting the entire child transcript or re-reading the repository broadly.
+- **Depth profiles**: Add explicit `quick`, `implementation`, and `audit` task profiles so callers can balance coverage, latency, and token usage.
+- **Regression metrics**: Test handoff completeness and track repeated parent searches, missing evidence, token cost, and repair frequency across representative tasks.
