@@ -1,5 +1,5 @@
 import type { Component, Terminal } from "@earendil-works/pi-tui";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Container, isViewportTUI, Text } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -17,11 +17,12 @@ describe("createInteractiveTui", () => {
 	it("selects the alternate-screen renderer only when requested", async () => {
 		const mainTerminal = new RecordingTerminal();
 		const mainTui = createInteractiveTui({
-			alt: false,
+			uiMode: "regular",
 			showHardwareCursor: false,
 			logDirectory: "/tmp",
 			terminal: mainTerminal,
 		});
+		expect(isViewportTUI(mainTui)).toBe(false);
 		mainTui.start();
 		await mainTerminal.waitForRender();
 		expect(mainTerminal.writes.some((write) => write.includes("\x1b[?1049h"))).toBe(false);
@@ -29,11 +30,12 @@ describe("createInteractiveTui", () => {
 
 		const altTerminal = new RecordingTerminal();
 		const altTui = createInteractiveTui({
-			alt: true,
+			uiMode: "fullscreen",
 			showHardwareCursor: false,
 			logDirectory: "/tmp",
 			terminal: altTerminal,
 		});
+		expect(isViewportTUI(altTui)).toBe(true);
 		altTui.start();
 		await altTerminal.waitForRender();
 		expect(altTerminal.writes.some((write) => write.includes("\x1b[?1049h"))).toBe(true);
@@ -44,7 +46,7 @@ describe("createInteractiveTui", () => {
 type ClearStatusContext = {
 	activeStatusIndicator: { kind: "working"; dispose: () => void } | undefined;
 	statusContainer: Container;
-	options: { alt?: boolean };
+	options: { uiMode?: "regular" | "fullscreen" };
 	ui: { getClearOnShrink: () => boolean };
 	idleStatus: Component;
 };
@@ -57,15 +59,15 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as Interac
 
 describe("clear-on-shrink status spacing", () => {
 	it("reserves status height only on the main-screen renderer", () => {
-		for (const [alt, expectedChildren] of [
-			[false, 1],
-			[true, 0],
+		for (const [uiMode, expectedChildren] of [
+			["regular", 1],
+			["fullscreen", 0],
 		] as const) {
 			const dispose = vi.fn();
 			const context: ClearStatusContext = {
 				activeStatusIndicator: { kind: "working", dispose },
 				statusContainer: new Container(),
-				options: { alt },
+				options: { uiMode },
 				ui: { getClearOnShrink: () => true },
 				idleStatus: new Text("", 0, 0),
 			};
